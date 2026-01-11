@@ -1,0 +1,10 @@
+---
+title: "main"
+author: "Olanrewaju Yusuf"
+date: "2026-01-11"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
