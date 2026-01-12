@@ -1,7 +1,7 @@
 ## Predictive Modeling of Student Academic Performance to Identify At-Risk Students
 
-This project addresses a key challenge for platforms
-like Coursera: identifying factors that influence student success.
+This project addresses a key challenge for educational institutions and platforms:
+identifying factors that influence student success.
 Using the "Student Performance" dataset from the
 [UCI Repository](https://archive.ics.uci.edu/dataset/320/student+performance),
 this project will be a predictive modeling (regression and classification) task.
