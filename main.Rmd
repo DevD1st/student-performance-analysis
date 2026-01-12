@@ -1,10 +1,221 @@
 ---
-title: "main"
+title: "Predictive Modeling of Student Academic Performance"
+subtitle: "Identifying At-Risk Students using Computational Intelligence"
 author: "Olanrewaju Yusuf"
 date: "2026-01-11"
-output: pdf_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: journal
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ```
+
+```{r}
+# install packages
+# install.packages(c("tidyverse", "caret", "corrplot", "gridExtra", "Rcpp", "tibble"), type = "binary")
+# install.packages(c("parallelly", "future", "listenv", "globals"), type = "binary")
+# install.packages("rpart.plot")
+
+# import packages
+library(tidyverse)  # For data manipulation and visualization (ggplot2)
+library(caret)      # For Machine Learning workflow
+library(corrplot)   # For correlation heatmaps
+library(gridExtra)  # To arrange plots side-by-side
+```
+
+We will be using the Portuguese Language course data because it is a larger dataset. The math dataset is included in the ./data folder.
+
+``` {r}
+student_data <- read.csv('./data/student-por.csv', sep = ';', stringsAsFactors = TRUE)
+```
+
+### EDA - sanity check
+```{r}
+# Inspect head and bottom rows
+head(student_data)
+tail(student_data)
+```
+
+Check the dimensions and column names
+```{r}
+dim(student_data)
+colnames(student_data)
+```
+
+We can confirm the dataset is complete as stated in the source. We can make meaning of the features by looking at ./data/student.txt.
+
+The dataset does not contain any missing value so we don't have to perform imputation step
+
+```{r}
+# structure of data
+str(student_data)
+# check for missing value
+sum(is.na(student_data))
+```
+#### Observations:
+- The dataset contains 649 observations and 33 variables.
+- There are no missing values (NA), so no imputation is required.
+- Variables like Medu, Fedu, traveltime, studytime are currently Integers but represent ordinal categories.
+- The target variable G3 (Final Grade) is numeric (0-20).
+
+### Feature Engineering
+```{r}
+# We need to combine mother and father education into a "Parent Education" metric
+# Medu and Fedu range from 0 (none) to 4 (higher education)
+student_data$Parent_Edu_Total <- student_data$Medu + student_data$Fedu
+
+# Create a binary target for classification (Pass/Fail)
+# If G3 < 10, the student is "At Risk" (Fail), otherwise, "Safe" (Pass)
+student_data$is_AtRisk <- ifelse(student_data$G3 < 10, "Yes", "No")
+student_data$is_AtRisk <- as.factor(student_data$is_AtRisk)
+
+# convert ordinal integers to factors for better visualization
+# we keep the original numeric versions for regression, but create factor versions for ploting
+student_data$studytime_factor <- as.factor(student_data$studytime)
+student_data$famrel_factor <- as.factor(student_data$famrel)
+student_data$traveltime_factor <- as.factor(student_data$traveltime)
+
+# verify the new columns
+summary(student_data$Parent_Edu_Total)
+table(student_data$is_AtRisk)
+```
+
+#### Observations:
+- Parent_Edu_Total ranges from 0-8. A higher score indicates a highly educated household
+- is_AtRisk devides students into 2 clases (as intended). Students who passed (>=10), and those at risk (<10)
+
+### Pattern Detection (EDA)
+we want to investigate Attendance (Absences) and Study Time to address the project's core hypothesis regarding behavioral factors
+```{r}
+# Pattern 1: Study Time vs. Final Grade (G3)
+p1 <- ggplot(student_data, aes(x=studytime_factor, y=G3, fill=studytime_factor)) + geom_boxplot() + labs(title="Impact of Study Time on Grades", x="Study Time (1=Low, 4=High)", y="Final Grade (G3)") + theme_minimal() + theme(legend.position="none")
+
+# Pattern 2: Absences vs. Final Grade (G3)
+# Using a scatter plot with a smoothing line to detect trends
+p2 <- ggplot(student_data, aes(x=absences, y=G3)) + geom_point(alpha=0.5, color="darkred") + geom_smooth(method="lm", color="blue") + labs(title="Impact of Absences on Grades", x="Number of Absences", y="Final Grade (G3)") + theme_minimal()
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+#### EDA Observations:
+- Study Time: There is a visible positive trend; students with higher study time categories (3 or 4) generally achieve higher median grades compared to those in category 1.
+- Absences: The scatter plot indicates a slight negative correlation. As absences increase, the final grade tends to drop, identifying attendance as a potential risk factor.
+
+### Statistical Hypothesis Testing
+We need to prove that our features maters statistically
+```{r}
+# 1. Correlation Matrix (Numeric Variables)
+# We select only numeric columns to see what correlates with G3
+numeric_vars <- student_data %>% select(G3, G1, G2, absences, studytime, failures, Parent_Edu_Total)
+cor_matrix <- cor(numeric_vars)
+
+# Plotting the Heatmap
+corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.cex = 0.8, addCoef.col = "black", diag = FALSE)
+
+# 2. Chi-Square Test (Categorical Variables)
+# Testing if 'Desire for Higher Education' affects 'At Risk' status
+# H0: They are independent (No relationship)
+# H1: They are dependent (Relationship exists)
+chisq_test_higher <- chisq.test(table(student_data$higher, student_data$is_AtRisk))
+print(chisq_test_higher)
+
+# Testing if 'Internet Access' affects 'At Risk' status
+chisq_test_net <- chisq.test(table(student_data$internet, student_data$is_AtRisk))
+print(chisq_test_net)
+```
+
+#### Observations:
+- Correlation: The heatmap confirms that prior grades (G1, G2) have the strongest correlation with G3 (r > 0.80). We also observed that, 'failures' has a significant negative correlation, this means that, past failures are a strong predictor of future poor performance.
+- Chi-Square Tests: The p-value for 'higher' (desire for higher education) is extremely low (p < 0.05), allowing us to reject the Null Hypothesis. This proves that a student's motivation for higher education is statistically linked to their risk of failure.
+
+### Data Partition and Regression Modelling
+we split the data and build a Regression model to predict the exact grade
+```{r}
+# Data partitioning
+set.seed(123) # to ensure reproducibility
+
+# split data -> 70% Training, 30% Testing
+# We use createDataPartition from 'caret' which preserves the distribution of G3
+trainIndex <- createDataPartition(student_data$G3, p = .7, list = FALSE, times = 1)
+train_set <- student_data[trainIndex,]
+test_set  <- student_data[-trainIndex,]
+
+# Check dimensions
+dim(train_set)
+dim(test_set)
+```
+
+```{r}
+# Model 1: Linear Regression (Predicting Exact Grade)
+# We remove 'is_AtRisk' (target for classification) and 'G3' (target for regression) from predictors
+
+# Train the model
+model_lm <- lm(G3 ~ G1 + G2 + studytime + failures + absences + Parent_Edu_Total + higher + internet, 
+               data = train_set)
+
+# View Model Summary (Coefficients and R-squared)
+summary(model_lm)
+
+# Make Predictions on Test Set
+predictions_lm <- predict(model_lm, test_set)
+
+# Evaluate Performance (RMSE and R-squared)
+postResample(pred = predictions_lm, obs = test_set$G3)
+```
+
+#### Observations:
+- The model achieved an Adjusted R-squared of 0.883, indicating that our predictors successfullt explain 88.3% of the varience in student grades.
+- The Root Mean Square Error (RSME) on test set was 1.55 points of the students' actual final score
+- Key Drivers:
+  -  The strongest predictor was the second period grade (G2), with a highly significant p-value ($p < 0.001$). The coefficient of 0.87 indicates that performance in the second term is nearly a direct proxy for final performance.
+  - History of failure (failures) was statistically significant ($p = 0.039$) and negatively correlated. Even when controlling for current grades, past failures exert a lingering negative impact on outcomes.
+  - Interestingly, socio-economic variables like Parent Education and Internet Access were not statistically significant in this model ($p > 0.05$). This implies that while these factors might influence initial performance, they are overshadowed by recent academic results (G1 and G2) when predicting the final grade.
+  
+### Classification Model and Visualization
+We will intentionally exclude G1 and G2 from the predictors. If we leave them, the tree will say "If G2 < 10, then Fail.". By removing them, we force the model to find the behavioral root causes (like study time, alcohol, family support) that lead to failure.
+```{r}
+# Train Decision Tree Model
+library(rpart)
+library(rpart.plot)
+
+# We include a mix of social, demographic, and behavioral features
+tree_model <- rpart(is_AtRisk ~ studytime + failures + absences + Parent_Edu_Total +higher + internet + freetime + goout + Walc + Dalc, data = train_set, method = "class", control = rpart.control(cp = 0.015)) # cp controls tree complexity
+
+# Visualize the Decision Tree
+rpart.plot(tree_model, box.palette = "RdBu", shadow.col = "gray", nn = TRUE, main = "Decision Tree: Behavioral Risk Factors")
+
+# Evaluate the Classifier
+tree_pred <- predict(tree_model, test_set, type = "class")
+
+# Confusion Matrix (Accuracy, Precision, Recall)
+# This tells us how good the model is at catching failing students
+conf_matrix <- confusionMatrix(tree_pred, test_set$is_AtRisk, positive = "Yes")
+print(conf_matrix)
+```
+
+### Observations:
+1. Interpretation of Decision Tree
+  - The root node split based on "Desire for Higher Education", this indicates that motivation is the strongest behavioral predictor. Students who do not wish to pursue higher education are immediately classified with a high probability of failure; if those students also have a high social output, their risk of failure maximizes.
+  - For motivated students (`higher = yes`), the model looks at their past failures, if they have no past failure, they are generally safe, otherwise, absences become the deciding factor.
+
+2. Model Performance Evaluation
+  - Specificity (94.5%): The model is excellent at identifying students that passed. It correctly identify 155 out of 166, this means the model rarely raises false alarm.
+  - Sensitivity (27.6%): The model correctly identifies 8 out of 29 failing students (True Positives). This is understandably low because it relies purely on life choices (alcohol, motivation, ...) rather than test scores. It proves that one-third of academic failures are clearly behavioral driven.
+  - Accuracy (84.5%): The model correctly classify student's status in 84.5% of cases, this provides a reliable baseline for identifying students that are in need of intervention programs.
+
+### Conclusion
+1.  Academic Momentum is the Strongest Predictor: The Regression analysis identified student's performance in second term (G2) as the strongest predictor of their final grade (G3).
+2.  Motivation is an Important Factor in Behavioral Analysis: The Decision Tree analysis revealed that a student's desire for higher education is the most important behavioral filter. Students lacking this motivation are more likely to engage in risky behaviors (like excessive going out) that lead to failure.
+3.  Recovery Pattern: The model identified a group who had past failures but still managed to pass due to low absences (< 5). This suggests that "at-risk" students can recover if they maintain high attendance.
+
+#### Recommendation:
+Based on these findings, the recommendation to educational institutions is to implement a two-leveled early warning system:
+
+- Level 1 (Behavioral): Students should be screened early for low motivation (no desire for higher education) and high absences.
+- Level 2 (Academic): Any students who fails their first term should be flagged for immediate remedial support, as the regression model shows that they are unlikely to revover on their own.
